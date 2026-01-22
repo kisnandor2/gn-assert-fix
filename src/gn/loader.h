@@ -8,7 +8,9 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
+#include <vector>
 
 #include "base/memory/ref_counted.h"
 #include "gn/label.h"
@@ -35,9 +37,11 @@ class Loader : public base::RefCountedThreadSafe<Loader> {
   // call to this (the one that actually starts the generation) should have an
   // empty toolchain name, which will trigger the load of the default build
   // config.
+  // The chain parameter contains the full inclusion chain (how we got here).
   virtual void Load(const SourceFile& file,
                     const LocationRange& origin,
-                    const Label& toolchain_name) = 0;
+                    const Label& toolchain_name,
+                    const std::vector<LocationRange>& chain = {}) = 0;
 
   // Notification that the given toolchain has loaded. This will unblock files
   // waiting on this definition.
@@ -55,7 +59,9 @@ class Loader : public base::RefCountedThreadSafe<Loader> {
 
   // Helper function that extracts the file and toolchain name from the given
   // label, and calls Load().
-  void Load(const Label& label, const LocationRange& origin);
+  void Load(const Label& label,
+            const LocationRange& origin,
+            const std::vector<LocationRange>& chain = {});
 
   // When processing the default build config, we want to capture the argument
   // of set_default_build_config. The implementation of that function uses this
@@ -83,7 +89,8 @@ class LoaderImpl : public Loader {
   // Loader implementation.
   void Load(const SourceFile& file,
             const LocationRange& origin,
-            const Label& toolchain_name) override;
+            const Label& toolchain_name,
+            const std::vector<LocationRange>& chain = {}) override;
   void ToolchainLoaded(const Toolchain* toolchain) override;
   Label GetDefaultToolchain() const override;
   const Settings* GetToolchainSettings(const Label& label) const override;
@@ -124,7 +131,7 @@ class LoaderImpl : public Loader {
 
   // Schedules the input file manager to load the given file.
   void ScheduleLoadFile(const Settings* settings,
-                        const LocationRange& origin,
+                        std::vector<LocationRange> chain,
                         const SourceFile& file);
   void ScheduleLoadBuildConfig(Settings* settings,
                                const Scope::KeyValueMap& toolchain_overrides);
@@ -133,7 +140,7 @@ class LoaderImpl : public Loader {
   // input file manager.
   void BackgroundLoadFile(const Settings* settings,
                           const SourceFile& file_name,
-                          const LocationRange& origin,
+                          std::vector<LocationRange> chain,
                           const ParseNode* root);
   void BackgroundLoadBuildConfig(Settings* settings,
                                  const Scope::KeyValueMap& toolchain_overrides,
@@ -173,6 +180,18 @@ class LoaderImpl : public Loader {
 
   using LoadIDSet = std::set<LoadID>;
   LoadIDSet invocations_;
+
+  // Maps each loaded file to the origin location that caused it to be loaded.
+  // Used to build inclusion chains lazily at error time.
+  // Protected by load_origins_mutex_ for thread-safe access.
+  using LoadOriginsMap = std::map<LoadID, LocationRange>;
+  LoadOriginsMap load_origins_;
+  mutable std::mutex load_origins_mutex_;
+
+  // Builds the inclusion chain for a file by walking back through load_origins_.
+  // Thread-safe.
+  std::vector<LocationRange> BuildInclusionChain(const SourceFile& file,
+                                                  const Label& toolchain) const;
 
   const BuildSettings* build_settings_;
   Label default_toolchain_label_;

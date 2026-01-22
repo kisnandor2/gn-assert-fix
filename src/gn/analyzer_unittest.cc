@@ -28,7 +28,8 @@ class MockLoader : public Loader {
 
   void Load(const SourceFile& file,
             const LocationRange& origin,
-            const Label& toolchain_name) override {}
+            const Label& toolchain_name,
+            const std::vector<LocationRange>& chain) override {}
   void ToolchainLoaded(const Toolchain* toolchain) override {}
   Label GetDefaultToolchain() const override {
     return Label(SourceDir("//tc/"), "default");

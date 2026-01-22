@@ -44,14 +44,17 @@ class BuilderRecordMap : public HashTableBase<BuilderRecordNode> {
   // Try to find BuilderRecord matching |label|, and create one if
   // none is found. result.first will be true to indicate that a new
   // record was created.
-  std::pair<bool, BuilderRecord*> try_emplace(const Label& label,
-                                              const ParseNode* request_from,
-                                              BuilderRecord::ItemType type) {
+  std::pair<bool, BuilderRecord*> try_emplace(
+      const Label& label,
+      const ParseNode* request_from,
+      BuilderRecord::ItemType type,
+      std::vector<LocationRange> referring_item_chain = {}) {
     NodeType* node = Lookup(label);
     if (node->is_valid()) {
       return {false, node->record};
     }
-    BuilderRecord* record = new BuilderRecord(type, label, request_from);
+    BuilderRecord* record = new BuilderRecord(type, label, request_from,
+                                              std::move(referring_item_chain));
     node->record = record;
     UpdateAfterInsert(false);
     return {true, record};

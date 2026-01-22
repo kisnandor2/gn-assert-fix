@@ -21,11 +21,11 @@
 namespace {
 
 struct SourceFileAndOrigin {
-  SourceFileAndOrigin(const SourceFile& f, const LocationRange& o)
-      : file(f), origin(o) {}
+  SourceFileAndOrigin(const SourceFile& f, std::vector<LocationRange> c)
+      : file(f), chain(std::move(c)) {}
 
   SourceFile file;
-  LocationRange origin;
+  std::vector<LocationRange> chain;  // Full inclusion chain, innermost first
 };
 
 }  // namespace
@@ -81,8 +81,10 @@ Loader::Loader() = default;
 
 Loader::~Loader() = default;
 
-void Loader::Load(const Label& label, const LocationRange& origin) {
-  Load(BuildFileForLabel(label), origin, label.GetToolchainLabel());
+void Loader::Load(const Label& label,
+                  const LocationRange& origin,
+                  const std::vector<LocationRange>& chain) {
+  Load(BuildFileForLabel(label), origin, label.GetToolchainLabel(), chain);
 }
 
 // -----------------------------------------------------------------------------
@@ -98,13 +100,30 @@ LoaderImpl::~LoaderImpl() = default;
 
 void LoaderImpl::Load(const SourceFile& file,
                       const LocationRange& origin,
-                      const Label& in_toolchain_name) {
+                      const Label& in_toolchain_name,
+                      const std::vector<LocationRange>& in_chain) {
   const Label& toolchain_name = in_toolchain_name.is_null()
                                     ? default_toolchain_label_
                                     : in_toolchain_name;
   LoadID load_id(file, toolchain_name);
   if (!invocations_.insert(load_id).second)
-    return;  // Already in set, so this file was already loaded or schedulerd.
+    return;  // Already in set, so this file was already loaded or scheduled.
+
+  // Store the origin for this file so we can build inclusion chains lazily.
+  // This is done under a lock since BuildInclusionChain() may read it from
+  // a worker thread.
+  {
+    std::lock_guard<std::mutex> lock(load_origins_mutex_);
+    load_origins_[load_id] = origin;
+  }
+
+  // Build the chain: prepend origin to the passed-in chain.
+  // TODO(cleanup): This eager chain building can be removed once all callers
+  // are updated to use BuildInclusionChain() instead.
+  std::vector<LocationRange> chain;
+  if (!origin.is_null())
+    chain.push_back(origin);
+  chain.insert(chain.end(), in_chain.begin(), in_chain.end());
 
   if (toolchain_records_.empty()) {
     // Nothing loaded, need to load the default build config. The initial load
@@ -122,7 +141,7 @@ void LoaderImpl::Load(const SourceFile& file,
     // toolchain name is.
     record->is_toolchain_loaded = true;
 
-    record->waiting_on_me.push_back(SourceFileAndOrigin(file, origin));
+    record->waiting_on_me.push_back(SourceFileAndOrigin(file, std::move(chain)));
     ScheduleLoadBuildConfig(&record->settings, Scope::KeyValueMap());
 
     return;
@@ -145,13 +164,14 @@ void LoaderImpl::Load(const SourceFile& file,
     toolchain_records_[toolchain_name] = std::move(new_record);
 
     // Schedule a load of the toolchain using the default one.
-    Load(BuildFileForLabel(toolchain_name), origin, default_toolchain_label_);
+    Load(BuildFileForLabel(toolchain_name), origin, default_toolchain_label_,
+         in_chain);
   }
 
   if (record->is_config_loaded)
-    ScheduleLoadFile(&record->settings, origin, file);
+    ScheduleLoadFile(&record->settings, std::move(chain), file);
   else
-    record->waiting_on_me.push_back(SourceFileAndOrigin(file, origin));
+    record->waiting_on_me.push_back(SourceFileAndOrigin(file, std::move(chain)));
 }
 
 void LoaderImpl::ToolchainLoaded(const Toolchain* toolchain) {
@@ -203,14 +223,17 @@ SourceFile LoaderImpl::BuildFileForLabel(const Label& label) const {
 }
 
 void LoaderImpl::ScheduleLoadFile(const Settings* settings,
-                                  const LocationRange& origin,
+                                  std::vector<LocationRange> chain,
                                   const SourceFile& file) {
   Err err;
   pending_loads_++;
+  // Use the innermost origin for the AsyncLoadFile call (first in chain).
+  LocationRange origin = chain.empty() ? LocationRange() : chain.front();
   if (!AsyncLoadFile(
           origin, settings->build_settings(), file,
-          [this, settings, file, origin](const ParseNode* parse_node) {
-            BackgroundLoadFile(settings, file, origin, parse_node);
+          [this, settings, file, chain = std::move(chain)](
+              const ParseNode* parse_node) mutable {
+            BackgroundLoadFile(settings, file, std::move(chain), parse_node);
           },
           &err)) {
     g_scheduler->FailWithError(err);
@@ -237,7 +260,7 @@ void LoaderImpl::ScheduleLoadBuildConfig(
 
 void LoaderImpl::BackgroundLoadFile(const Settings* settings,
                                     const SourceFile& file_name,
-                                    const LocationRange& origin,
+                                    std::vector<LocationRange> chain,
                                     const ParseNode* root) {
   if (!root) {
     task_runner_->PostTask([this]() { DecrementPendingLoads(); });
@@ -255,6 +278,9 @@ void LoaderImpl::BackgroundLoadFile(const Settings* settings,
   our_scope.set_source_dir(file_name.GetDir());
   our_scope.AddBuildDependencyFile(file_name);
 
+  // Set the inclusion chain so items defined in this file know how we got here.
+  our_scope.set_inclusion_chain(&chain);
+
   // Targets, etc. generated as part of running this file will end up here.
   Scope::ItemVector collected_items;
   our_scope.set_item_collector(&collected_items);
@@ -268,8 +294,17 @@ void LoaderImpl::BackgroundLoadFile(const Settings* settings,
     our_scope.CheckForUnusedVars(&err);
 
   if (err.has_error()) {
-    if (!origin.is_null())
-      err.AppendSubErr(Err(origin, "which caused the file to be included."));
+    // Build the inclusion chain lazily by walking back through load origins.
+    // This ensures we get the complete chain even if the file was first loaded
+    // through a different (shorter) dependency path.
+    std::vector<LocationRange> inclusion_chain =
+        BuildInclusionChain(file_name, settings->toolchain_label());
+
+    // Append the full inclusion chain as sub-errors (innermost first).
+    for (const LocationRange& origin : inclusion_chain) {
+      if (!origin.is_null())
+        err.AppendSubErr(Err(origin, "which caused the file to be included."));
+    }
 
     if (!settings->is_default())
       err.set_toolchain_label(settings->toolchain_label());
@@ -411,6 +446,22 @@ void LoaderImpl::DidLoadBuildConfig(const Label& label) {
         invocations_.insert(load);
       }
     }
+
+    // Also update load_origins_ with the correct toolchain label.
+    {
+      std::lock_guard<std::mutex> lock(load_origins_mutex_);
+      LoadOriginsMap old_origins;
+      old_origins.swap(load_origins_);
+      for (const auto& entry : old_origins) {
+        if (entry.first.toolchain_name.is_null()) {
+          // Fix up toolchain label
+          load_origins_[LoadID(entry.first.file, label)] = entry.second;
+        } else {
+          // Can keep the old one.
+          load_origins_.insert(entry);
+        }
+      }
+    }
   } else {
     record = found_toolchain->second.get();
   }
@@ -420,8 +471,8 @@ void LoaderImpl::DidLoadBuildConfig(const Label& label) {
   record->is_config_loaded = true;
 
   // Schedule all waiting file loads.
-  for (const auto& waiting : record->waiting_on_me)
-    ScheduleLoadFile(&record->settings, waiting.origin, waiting.file);
+  for (auto& waiting : record->waiting_on_me)
+    ScheduleLoadFile(&record->settings, std::move(waiting.chain), waiting.file);
   record->waiting_on_me.clear();
 
   DecrementPendingLoads();
@@ -445,4 +496,37 @@ bool LoaderImpl::AsyncLoadFile(const LocationRange& origin,
   }
   return g_scheduler->input_file_manager()->AsyncLoadFile(
       origin, build_settings, file_name, std::move(callback), err);
+}
+
+std::vector<LocationRange> LoaderImpl::BuildInclusionChain(
+    const SourceFile& file,
+    const Label& toolchain) const {
+  std::vector<LocationRange> chain;
+
+  std::lock_guard<std::mutex> lock(load_origins_mutex_);
+
+  SourceFile current_file = file;
+  // Walk back through the load origins to build the chain.
+  // Limit iterations to prevent infinite loops in case of bugs.
+  for (int i = 0; i < 1000; ++i) {
+    LoadID load_id(current_file, toolchain);
+    auto it = load_origins_.find(load_id);
+    if (it == load_origins_.end())
+      break;
+
+    const LocationRange& origin = it->second;
+    if (origin.is_null())
+      break;
+
+    chain.push_back(origin);
+
+    // Get the parent file from the origin location.
+    const InputFile* input_file = origin.begin().file();
+    if (!input_file)
+      break;
+
+    current_file = input_file->name();
+  }
+
+  return chain;
 }

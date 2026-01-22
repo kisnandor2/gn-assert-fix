@@ -74,10 +74,14 @@ class Builder {
   //
   // If any of the conditions fail, the return value will be null and the error
   // will be set. request_from is used as the source of the error.
-  BuilderRecord* GetOrCreateRecordOfType(const Label& label,
-                                         const ParseNode* request_from,
-                                         BuilderRecord::ItemType type,
-                                         Err* err);
+  // The referring_item_chain is the inclusion chain of the item making the
+  // reference (used for error reporting).
+  BuilderRecord* GetOrCreateRecordOfType(
+      const Label& label,
+      const ParseNode* request_from,
+      BuilderRecord::ItemType type,
+      Err* err,
+      const std::vector<LocationRange>& referring_item_chain = {});
 
   // Returns the record associated with the given label. This function checks
   // that it's already been resolved to the correct type.

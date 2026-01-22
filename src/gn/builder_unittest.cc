@@ -23,7 +23,8 @@ class MockLoader : public Loader {
   // Loader implementation:
   void Load(const SourceFile& file,
             const LocationRange& origin,
-            const Label& toolchain_name) override {
+            const Label& toolchain_name,
+            const std::vector<LocationRange>& chain) override {
     files_.push_back(file);
   }
   void ToolchainLoaded(const Toolchain* toolchain) override {}
