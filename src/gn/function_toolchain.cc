@@ -212,6 +212,8 @@ Value RunToolchain(Scope* scope,
   std::unique_ptr<Toolchain> toolchain = std::make_unique<Toolchain>(
       scope->settings(), label, scope->CollectBuildDependencyFiles());
   toolchain->set_defined_from(function);
+  if (const std::vector<LocationRange>* chain = scope->GetInclusionChain())
+    toolchain->set_inclusion_chain(*chain);
   toolchain->visibility().SetPublic();
 
   Scope block_scope(scope);

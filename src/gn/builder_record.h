@@ -7,6 +7,7 @@
 
 #include <memory>
 #include <utility>
+#include <vector>
 
 #include "gn/item.h"
 #include "gn/location.h"
@@ -40,7 +41,8 @@ class BuilderRecord {
 
   BuilderRecord(ItemType type,
                 const Label& label,
-                const ParseNode* originally_referenced_from);
+                const ParseNode* originally_referenced_from,
+                std::vector<LocationRange> referring_item_chain = {});
 
   ItemType type() const { return type_; }
   const Label& label() const { return label_; }
@@ -63,6 +65,12 @@ class BuilderRecord {
   // before a reference, this will be the empty range.
   const ParseNode* originally_referenced_from() const {
     return originally_referenced_from_;
+  }
+
+  // The inclusion chain of the item that referenced this record.
+  // Used to provide full context when errors occur in transitively loaded files.
+  const std::vector<LocationRange>& referring_item_chain() const {
+    return referring_item_chain_;
   }
 
   bool should_generate() const { return should_generate_; }
@@ -109,6 +117,7 @@ class BuilderRecord {
   Label label_;
   std::unique_ptr<Item> item_;
   const ParseNode* originally_referenced_from_ = nullptr;
+  std::vector<LocationRange> referring_item_chain_;
 
   size_t unresolved_count_ = 0;
   BuilderRecordSet all_deps_;
