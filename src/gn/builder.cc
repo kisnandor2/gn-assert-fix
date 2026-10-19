@@ -326,7 +326,7 @@ bool Builder::ToolchainDefined(BuilderRecord* record, Err* err) {
 
     BuilderRecord* dep_record = GetOrCreateRecordOfType(
         tool.second->pool().label, tool.second->pool().origin,
-        BuilderRecord::ITEM_POOL, err);
+        BuilderRecord::ITEM_POOL, err, toolchain->inclusion_chain());
     if (!dep_record)
       return false;
     record->AddDep(dep_record);
@@ -349,11 +349,14 @@ BuilderRecord* Builder::GetOrCreateRecordForTesting(const Label& label) {
                                  &err);
 }
 
-BuilderRecord* Builder::GetOrCreateRecordOfType(const Label& label,
-                                                const ParseNode* request_from,
-                                                BuilderRecord::ItemType type,
-                                                Err* err) {
-  auto pair = records_.try_emplace(label, request_from, type);
+BuilderRecord* Builder::GetOrCreateRecordOfType(
+    const Label& label,
+    const ParseNode* request_from,
+    BuilderRecord::ItemType type,
+    Err* err,
+    const std::vector<LocationRange>& referring_item_chain) {
+  auto pair =
+      records_.try_emplace(label, request_from, type, referring_item_chain);
   BuilderRecord* record = pair.second;
 
   // Check types, if the record was not just created.
@@ -412,9 +415,11 @@ BuilderRecord* Builder::GetResolvedRecordOfType(const Label& label,
 bool Builder::AddDeps(BuilderRecord* record,
                       const LabelConfigVector& configs,
                       Err* err) {
+  const auto& chain = record->item() ? record->item()->inclusion_chain()
+                                     : std::vector<LocationRange>();
   for (const auto& config : configs) {
     BuilderRecord* dep_record = GetOrCreateRecordOfType(
-        config.label, config.origin, BuilderRecord::ITEM_CONFIG, err);
+        config.label, config.origin, BuilderRecord::ITEM_CONFIG, err, chain);
     if (!dep_record)
       return false;
     record->AddDep(dep_record);
@@ -425,9 +430,11 @@ bool Builder::AddDeps(BuilderRecord* record,
 bool Builder::AddDeps(BuilderRecord* record,
                       const UniqueVector<LabelConfigPair>& configs,
                       Err* err) {
+  const auto& chain = record->item() ? record->item()->inclusion_chain()
+                                     : std::vector<LocationRange>();
   for (const auto& config : configs) {
     BuilderRecord* dep_record = GetOrCreateRecordOfType(
-        config.label, config.origin, BuilderRecord::ITEM_CONFIG, err);
+        config.label, config.origin, BuilderRecord::ITEM_CONFIG, err, chain);
     if (!dep_record)
       return false;
     record->AddDep(dep_record);
@@ -438,9 +445,11 @@ bool Builder::AddDeps(BuilderRecord* record,
 bool Builder::AddDeps(BuilderRecord* record,
                       const LabelTargetVector& targets,
                       Err* err) {
+  const auto& chain = record->item() ? record->item()->inclusion_chain()
+                                     : std::vector<LocationRange>();
   for (const auto& target : targets) {
     BuilderRecord* dep_record = GetOrCreateRecordOfType(
-        target.label, target.origin, BuilderRecord::ITEM_TARGET, err);
+        target.label, target.origin, BuilderRecord::ITEM_TARGET, err, chain);
     if (!dep_record)
       return false;
     record->AddDep(dep_record);
@@ -451,9 +460,11 @@ bool Builder::AddDeps(BuilderRecord* record,
 bool Builder::AddGenDeps(BuilderRecord* record,
                          const LabelTargetVector& targets,
                          Err* err) {
+  const auto& chain = record->item() ? record->item()->inclusion_chain()
+                                     : std::vector<LocationRange>();
   for (const auto& target : targets) {
     BuilderRecord* dep_record = GetOrCreateRecordOfType(
-        target.label, target.origin, BuilderRecord::ITEM_TARGET, err);
+        target.label, target.origin, BuilderRecord::ITEM_TARGET, err, chain);
     if (!dep_record)
       return false;
     record->AddGenDep(dep_record);
@@ -467,9 +478,9 @@ bool Builder::AddPoolDep(BuilderRecord* record,
   if (target->pool().label.is_null())
     return true;
 
-  BuilderRecord* pool_record =
-      GetOrCreateRecordOfType(target->pool().label, target->pool().origin,
-                              BuilderRecord::ITEM_POOL, err);
+  BuilderRecord* pool_record = GetOrCreateRecordOfType(
+      target->pool().label, target->pool().origin, BuilderRecord::ITEM_POOL,
+      err, target->inclusion_chain());
   if (!pool_record)
     return false;
   record->AddDep(pool_record);
@@ -482,7 +493,7 @@ bool Builder::AddToolchainDep(BuilderRecord* record,
                               Err* err) {
   BuilderRecord* toolchain_record = GetOrCreateRecordOfType(
       target->settings()->toolchain_label(), target->defined_from(),
-      BuilderRecord::ITEM_TOOLCHAIN, err);
+      BuilderRecord::ITEM_TOOLCHAIN, err, target->inclusion_chain());
   if (!toolchain_record)
     return false;
   record->AddDep(toolchain_record);
@@ -527,7 +538,8 @@ void Builder::RecursiveSetShouldGenerate(BuilderRecord* record, bool force) {
 
 void Builder::ScheduleItemLoadIfNecessary(BuilderRecord* record) {
   const ParseNode* origin = record->originally_referenced_from();
-  loader_->Load(record->label(), origin ? origin->GetRange() : LocationRange());
+  loader_->Load(record->label(), origin ? origin->GetRange() : LocationRange(),
+                record->referring_item_chain());
 }
 
 bool Builder::ResolveItem(BuilderRecord* record, Err* err) {

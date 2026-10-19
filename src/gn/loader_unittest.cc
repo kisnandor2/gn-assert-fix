@@ -12,6 +12,7 @@
 
 #include "gn/build_settings.h"
 #include "gn/err.h"
+#include "gn/input_file.h"
 #include "gn/parse_tree.h"
 #include "gn/parser.h"
 #include "gn/scheduler.h"
@@ -390,4 +391,125 @@ TEST_F(LoaderTest, NonDefaultBuildFileName) {
   EXPECT_TRUE(mock_ifm_.HasOnePending(second_file));
 
   EXPECT_FALSE(scheduler().is_failed());
+}
+
+TEST_F(LoaderTest, ErrorWithInclusionChain) {
+  SourceFile build_config("//build/config/BUILDCONFIG.gn");
+  SourceFile root_build("//BUILD.gn");
+  SourceFile child_build("//child/BUILD.gn");
+  build_settings_.set_build_config_file(build_config);
+
+  scoped_refptr<LoaderImpl> loader(new LoaderImpl(&build_settings_));
+  mock_ifm_.AddCannedResponse(build_config,
+                              "set_default_toolchain(\"//tc:tc\")");
+  // Root build file that depends on child.
+  mock_ifm_.AddCannedResponse(root_build,
+                              "group(\"root\") { deps = [\"//child:child\"] }");
+  // Child build file with an assertion failure.
+  mock_ifm_.AddCannedResponse(child_build,
+                              "assert(false, \"intentional failure\")");
+
+  loader->set_async_load_file(mock_ifm_.GetAsyncCallback());
+
+  // Request the root build file be loaded.
+  loader->Load(root_build, LocationRange(), Label());
+  EXPECT_TRUE(mock_ifm_.HasOnePending(build_config));
+
+  // Complete the build config load.
+  mock_ifm_.IssueAllPending();
+  MsgLoop::Current()->RunUntilIdleForTesting();
+  EXPECT_TRUE(mock_ifm_.HasOnePending(root_build));
+
+  // Complete the root build file load.
+  mock_ifm_.IssueAllPending();
+  MsgLoop::Current()->RunUntilIdleForTesting();
+
+  // Suppress output so the test doesn't print errors.
+  scheduler().SuppressOutputForTesting(true);
+
+  // Now load the child file with an origin pointing to root_build.
+  // Create a fake origin location in root_build.
+  InputFile input_file(root_build);
+  input_file.SetContents("group(\"root\") { deps = [\"//child:child\"] }");
+  LocationRange origin(Location(&input_file, 1, 16),
+                       Location(&input_file, 1, 36));
+
+  loader->Load(child_build, origin, Label());
+
+  // The child file should be pending.
+  EXPECT_TRUE(mock_ifm_.HasOnePending(child_build));
+
+  // Complete the child build file load - this should trigger the assert error.
+  mock_ifm_.IssueAllPending();
+  MsgLoop::Current()->RunUntilIdleForTesting();
+
+  // The scheduler should have failed due to the assert.
+  EXPECT_TRUE(scheduler().is_failed());
+}
+
+// Tests that when a file fails with a multi-level inclusion chain,
+// all levels are reported. This simulates:
+//   //BUILD.gn -> //dep1/BUILD.gn -> //dep2/BUILD.gn -> //dep3/BUILD.gn (fails)
+TEST_F(LoaderTest, ErrorWithMultiLevelInclusionChain) {
+  SourceFile build_config("//build/config/BUILDCONFIG.gn");
+  SourceFile root_build("//BUILD.gn");
+  SourceFile dep3_build("//dep3/BUILD.gn");
+  build_settings_.set_build_config_file(build_config);
+
+  scoped_refptr<LoaderImpl> loader(new LoaderImpl(&build_settings_));
+  mock_ifm_.AddCannedResponse(build_config,
+                              "set_default_toolchain(\"//tc:tc\")");
+  mock_ifm_.AddCannedResponse(root_build, "group(\"root\") {}");
+  // dep3 has an assertion failure.
+  mock_ifm_.AddCannedResponse(dep3_build, "assert(false, \"failure in dep3\")");
+
+  loader->set_async_load_file(mock_ifm_.GetAsyncCallback());
+
+  // Load the root build file first to set up the default toolchain.
+  loader->Load(root_build, LocationRange(), Label());
+  mock_ifm_.IssueAllPending();
+  MsgLoop::Current()->RunUntilIdleForTesting();
+  mock_ifm_.IssueAllPending();
+  MsgLoop::Current()->RunUntilIdleForTesting();
+
+  // Suppress output so the test doesn't print errors.
+  scheduler().SuppressOutputForTesting(true);
+
+  // Create fake input files for the chain.
+  // Chain: root -> dep1 -> dep2 -> dep3
+  InputFile root_input(SourceFile("//BUILD.gn"));
+  root_input.SetContents("deps = [\"//dep1\"]");
+  LocationRange root_origin(Location(&root_input, 1, 8),
+                            Location(&root_input, 1, 17));
+
+  InputFile dep1_input(SourceFile("//dep1/BUILD.gn"));
+  dep1_input.SetContents("deps = [\"//dep2\"]");
+  LocationRange dep1_origin(Location(&dep1_input, 1, 8),
+                            Location(&dep1_input, 1, 17));
+
+  InputFile dep2_input(SourceFile("//dep2/BUILD.gn"));
+  dep2_input.SetContents("deps = [\"//dep3\"]");
+  LocationRange dep2_origin(Location(&dep2_input, 1, 8),
+                            Location(&dep2_input, 1, 17));
+
+  // Build the chain: dep2 -> dep1 -> root (innermost first)
+  std::vector<LocationRange> existing_chain = {dep1_origin, root_origin};
+
+  // Load dep3 with the origin (dep2) and the existing chain (dep1, root).
+  // The full chain should be: dep2 -> dep1 -> root
+  loader->Load(dep3_build, dep2_origin, Label(), existing_chain);
+
+  // The dep3 file should be pending.
+  EXPECT_TRUE(mock_ifm_.HasOnePending(dep3_build));
+
+  // Complete the dep3 build file load - this should trigger the assert error.
+  mock_ifm_.IssueAllPending();
+  MsgLoop::Current()->RunUntilIdleForTesting();
+
+  // The scheduler should have failed due to the assert.
+  // The error message should contain all three levels of the chain:
+  //   See //dep2/BUILD.gn:1:8: which caused the file to be included.
+  //   See //dep1/BUILD.gn:1:8: which caused the file to be included.
+  //   See //BUILD.gn:1:8: which caused the file to be included.
+  EXPECT_TRUE(scheduler().is_failed());
 }

@@ -332,6 +332,13 @@ class Scope {
   }
   ItemVector* GetItemCollector();
 
+  // The inclusion chain represents the sequence of file references that led
+  // to the current file being loaded. Used for error reporting.
+  void set_inclusion_chain(const std::vector<LocationRange>* chain) {
+    inclusion_chain_ = chain;
+  }
+  const std::vector<LocationRange>* GetInclusionChain() const;
+
   // Properties are opaque pointers that code can use to set state on a Scope
   // that it can retrieve later.
   //
@@ -412,6 +419,10 @@ class Scope {
   TemplateMap templates_;
 
   ItemVector* item_collector_;
+
+  // The inclusion chain for the file being executed. Points to external
+  // storage (owned by the loader).
+  const std::vector<LocationRange>* inclusion_chain_ = nullptr;
 
   // Opaque pointers. See SetProperty() above.
   using PropertyMap = std::map<const void*, void*>;

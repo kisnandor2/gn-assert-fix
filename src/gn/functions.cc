@@ -375,6 +375,8 @@ Value RunConfig(const FunctionCallNode* function,
   std::unique_ptr<Config> config = std::make_unique<Config>(
       scope->settings(), label, scope->CollectBuildDependencyFiles());
   config->set_defined_from(function);
+  if (const std::vector<LocationRange>* chain = scope->GetInclusionChain())
+    config->set_inclusion_chain(*chain);
   if (!Visibility::FillItemVisibility(config.get(), scope, err))
     return Value();
 
@@ -914,6 +916,8 @@ Value RunPool(const FunctionCallNode* function,
   // Create the new pool.
   std::unique_ptr<Pool> pool = std::make_unique<Pool>(
       scope->settings(), label, scope->CollectBuildDependencyFiles());
+  if (const std::vector<LocationRange>* chain = scope->GetInclusionChain())
+    pool->set_inclusion_chain(*chain);
 
   if (label.name() == "console") {
     const Settings* settings = scope->settings();

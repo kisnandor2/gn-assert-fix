@@ -7,8 +7,10 @@
 
 #include <set>
 #include <string>
+#include <vector>
 
 #include "gn/label.h"
+#include "gn/location.h"
 #include "gn/source_file.h"
 #include "gn/visibility.h"
 
@@ -37,6 +39,16 @@ class Item {
 
   const ParseNode* defined_from() const { return defined_from_; }
   void set_defined_from(const ParseNode* df) { defined_from_ = df; }
+
+  // The chain of locations that led to the file where this item was defined.
+  // This is used for error reporting to show how a file was transitively
+  // included. The chain is ordered from innermost (most recent) to outermost.
+  const std::vector<LocationRange>& inclusion_chain() const {
+    return inclusion_chain_;
+  }
+  void set_inclusion_chain(std::vector<LocationRange> chain) {
+    inclusion_chain_ = std::move(chain);
+  }
 
   bool testonly() const { return testonly_; }
   void set_testonly(bool value) { testonly_ = value; }
@@ -79,6 +91,7 @@ class Item {
   Label label_;
   SourceFileSet build_dependency_files_;
   const ParseNode* defined_from_;
+  std::vector<LocationRange> inclusion_chain_;
 
   bool testonly_ = false;
   Visibility visibility_;

@@ -565,6 +565,16 @@ Scope::ItemVector* Scope::GetItemCollector() {
   return nullptr;
 }
 
+const std::vector<LocationRange>* Scope::GetInclusionChain() const {
+  if (inclusion_chain_)
+    return inclusion_chain_;
+  if (const_containing())
+    return const_containing()->GetInclusionChain();
+  if (mutable_containing())
+    return mutable_containing()->GetInclusionChain();
+  return nullptr;
+}
+
 void Scope::SetProperty(const void* key, void* value) {
   if (!value) {
     DCHECK(properties_.find(key) != properties_.end());

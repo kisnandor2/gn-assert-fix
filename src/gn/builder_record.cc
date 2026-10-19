@@ -8,10 +8,12 @@
 
 BuilderRecord::BuilderRecord(ItemType type,
                              const Label& label,
-                             const ParseNode* originally_referenced_from)
+                             const ParseNode* originally_referenced_from,
+                             std::vector<LocationRange> referring_item_chain)
     : type_(type),
       label_(label),
-      originally_referenced_from_(originally_referenced_from) {}
+      originally_referenced_from_(originally_referenced_from),
+      referring_item_chain_(std::move(referring_item_chain)) {}
 
 // static
 const char* BuilderRecord::GetNameForType(ItemType type) {

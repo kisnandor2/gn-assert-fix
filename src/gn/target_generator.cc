@@ -112,6 +112,8 @@ void TargetGenerator::GenerateTarget(Scope* scope,
   std::unique_ptr<Target> target = std::make_unique<Target>(
       scope->settings(), label, scope->CollectBuildDependencyFiles());
   target->set_defined_from(function_call);
+  if (const std::vector<LocationRange>* chain = scope->GetInclusionChain())
+    target->set_inclusion_chain(*chain);
 
   // Create and call out to the proper generator.
   if (output_type == functions::kBundleData) {
